@@ -1,0 +1,1868 @@
+﻿using ExcelDataReader;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using OfficeOpenXml;
+using StateEmploymentPortal.Api.Bootstrap;
+using StateEmploymentPortal.Domain.Business;
+using StateEmploymentPortal.Domain.Interfaces;
+using StateEmploymentPortal.Infrastructure.Utilities;
+using StateEmploymentPortal.Models;
+using StateEmploymentPortal.Models.DbEntities;
+using StateEmploymentPortal.Models.Enums;
+using StateEmploymentPortal.Models.ViewModels;
+using StateEmploymentPortal.UnitOfWork.Main;
+using StateEmploymentPortal.ViewModels;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Net.Http;
+using System.Threading.Tasks;
+
+namespace StateEmploymentPortal.Api.Controllers.CoreDomain
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    [Authorize]
+    public class BulkUploadsController : BaseCoreDomainController<UserMaster, UserMaster>
+    {
+        private IMainUow _unitOfWork { get; }
+        private readonly IUserMasterDomain _domain;
+        private readonly UserManager<ApplicationUser> _userManager;
+        private readonly IGenericEntityRepository<JobPost> _jobPostRepository;
+        private readonly IGenericEntityRepository<UserMaster> _userMasterRepository;
+        private readonly IEmailSender _emailSender;
+        private readonly ISmsSender _smsSender;
+
+        private readonly IWebHostEnvironment _hostingEnvironment;
+        private readonly IGenericEntityRepository<MediaFile> _mediaFileRepository;
+        private readonly IGenericEntityRepository<UserCommunication> _userCommunication;
+        private readonly IGenericEntityRepository<UserEducationMaster> _userEducationMaster;
+        private readonly IGenericEntityRepository<UserEducationDetail> _userEducationDetail;
+        private readonly IGenericEntityRepository<AppObject> _appObject;
+        private readonly IGenericEntityRepository<DistrictMaster> _districtMaster;
+        private readonly IGenericEntityRepository<Taluka> _talukas;
+        private readonly IGenericEntityRepository<VillageMaster> _villageMaster;
+        private readonly IGenericEntityRepository<EducationMaster> _educationMasters;
+        private readonly IGenericEntityRepository<SpecializationMaster> _specialization;
+
+        private readonly IGenericEntityRepository<UserOrganisation> _userOrganisation;
+
+        private readonly IGenericEntityRepository<JobPostEducation> _jobPostEducation;
+        private readonly IGenericEntityRepository<JobPostLocation> _jobPostLocation;
+        public BulkUploadsController(
+            IUserMasterDomain domain,
+              IGenericEntityRepository<JobPost> jobPostRepository,
+              IGenericEntityRepository<UserMaster> userMasterRepository,
+             IEmailSender emailSender,
+             ISmsSender smsSender,
+        UserManager<ApplicationUser> userManager,
+
+            IWebHostEnvironment hostingEnvironment,
+            IGenericEntityRepository<MediaFile> mediaFileRepository,
+            IGenericEntityRepository<UserCommunication> userCommunication,
+            IGenericEntityRepository<UserEducationMaster> userEducationMaster,
+            IGenericEntityRepository<UserEducationDetail> userEducationDetail,
+            IGenericEntityRepository<AppObject> appObject,
+            IGenericEntityRepository<DistrictMaster> districtMaster,
+            IGenericEntityRepository<Taluka> talukas,
+             IGenericEntityRepository<VillageMaster> villageMaster,
+            IGenericEntityRepository<SpecializationMaster> specialization,
+            IGenericEntityRepository<EducationMaster> educationMasters,
+
+            IGenericEntityRepository<UserOrganisation> userOrganisation,
+            IGenericEntityRepository<JobPostEducation> jobPostEducation,
+            IGenericEntityRepository<JobPostLocation> jobPostLocation,
+        IMainUow unitOfWork
+            ) : base(domain)
+
+
+        {
+            this._domain = domain;
+            this._jobPostRepository = jobPostRepository;
+            _userMasterRepository = userMasterRepository;
+            this._emailSender = emailSender;
+            _smsSender = smsSender;
+            this._userManager = userManager;
+
+            _hostingEnvironment = hostingEnvironment;
+            _mediaFileRepository = mediaFileRepository;
+            _userCommunication = userCommunication;
+            _userEducationMaster = userEducationMaster;
+            _userEducationDetail = userEducationDetail;
+            _appObject = appObject;
+            _districtMaster = districtMaster;
+            _talukas = talukas;
+            _villageMaster = villageMaster;
+            _educationMasters = educationMasters;
+            _specialization = specialization;
+
+            this._unitOfWork = unitOfWork;
+            _userOrganisation = userOrganisation;
+
+            _jobPostEducation = jobPostEducation;
+            _jobPostLocation = jobPostLocation;
+        }
+        private static Random random = new Random();
+        public static string RandomString(int length)
+        {
+            const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+            return new string(Enumerable.Repeat(chars, length)
+              .Select(s => s[random.Next(s.Length)]).ToArray());
+        }
+        [HttpPost]
+        [Route("upload-jobseeker-list-xls")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public virtual async Task<IActionResult> PostUploadJobseekerXLS(IFormFile file)
+        {
+            try
+            {
+                var loginuser = await _userManager.GetUserAsync(this.User);
+                if (loginuser == null)
+                {
+                    ModelState.AddModelError("error", "");
+                    return GenerateBadRequest(ModelState);
+                }
+                #region Variable Declaration  
+                string message = "";
+                HttpResponseMessage ResponseMessage = null;
+
+                DataSet dsexcelRecords = new DataSet();
+                IExcelDataReader reader = null;
+                Stream FileStream = null;
+                #endregion
+                //var path = @"D:\1234";
+                string fileName = Path.GetFileName(file.FileName);
+
+                string filePath = "files/docs/bulkupload" + DateTime.Now.Year + "/" + DateTime.Now.Month;
+                string dirPath = Path.Combine(_hostingEnvironment.WebRootPath, filePath);
+                bool exists = System.IO.Directory.Exists(dirPath);
+
+                if (!exists)
+                    System.IO.Directory.CreateDirectory(dirPath);
+
+                string extension = System.IO.Path.GetExtension(file.FileName);
+                string uniqueFileName = Guid.NewGuid().ToString() + "_" + file.FileName;
+                var path = Path.Combine(dirPath, uniqueFileName);
+                //file.CopyTo(new FileStream(path, FileMode.Create));
+                //file.CopyToAsync(new FileStream(path, FileMode.Create));
+
+                MediaFile mediaFile = new MediaFile();
+                mediaFile.Title = file.FileName;
+                mediaFile.MediaType = file.ContentType;
+                mediaFile.MediaUrl = "wwwroot/" + filePath + "/" + uniqueFileName;
+                mediaFile.MediaUrl = filePath + "/" + uniqueFileName;
+                _mediaFileRepository.Insert(mediaFile);
+
+                using (FileStream Inputfile = new FileStream(path, FileMode.Create))
+                {
+                    file.CopyTo(Inputfile);
+
+                    #region Save Salary From Excel  
+                    //Inputfile = stream;
+                    FileStream = Inputfile;
+
+                    if (Inputfile != null && FileStream != null)
+                    {
+                        if (fileName.EndsWith(".xls"))
+                            reader = ExcelReaderFactory.CreateBinaryReader(FileStream);
+                        else if (fileName.EndsWith(".xlsx"))
+                            reader = ExcelReaderFactory.CreateOpenXmlReader(FileStream);
+                        else
+                            message = "The file format is not supported.";
+
+                        dsexcelRecords = reader.AsDataSet();
+                        reader.Close();
+
+                        if (dsexcelRecords != null && dsexcelRecords.Tables.Count > 0)
+                        {
+                            int output = 0;
+                            int interroput = 0;
+                            int recordexput = 0;
+                            int erroput = 0;
+
+                            string temp = "";
+                            DataTable dtStudentRecords = dsexcelRecords.Tables[0];
+                            if (dtStudentRecords.Rows.Count > 1005)
+                            {
+                                message = "The Excel file uploaded limit is 1000 Records per file.";
+                            }
+                            else { 
+                            for (int i = 1; i < dtStudentRecords.Rows.Count; i++)
+                            {
+                                bool isRecordExist = false;
+                                UserMaster entity = new UserMaster();
+                                UserCommunication userCommunication = new UserCommunication();
+                                UserEducationMaster userEducationMaster = new UserEducationMaster();
+                                try
+                                {
+                                    Random ran = new Random();
+                                    const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";                                    
+                                    entity.RegType = 1;//Temp
+                                    entity.IsProfileCompleted = true;
+                                    entity.Password = RandomString(10);
+                                    temp += entity.Password;
+                                    entity.FirstName = Convert.ToString(dtStudentRecords.Rows[i][0]);
+                                    entity.MiddleName = Convert.ToString(dtStudentRecords.Rows[i][1]);
+                                    entity.LastName = Convert.ToString(dtStudentRecords.Rows[i][2]);
+                                    string strGender = Convert.ToString(dtStudentRecords.Rows[i][3]);
+                                    AppObject strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 1006 && x.Name == strGender).AsNoTracking().FirstOrDefault();
+                                    try
+                                    {
+                                        if (strGenderid != null) entity.GenderId = (int)strGenderid.Id;
+                                    }
+                                    catch
+                                    {
+                                    }
+                                    try
+                                    {
+                                        //entity.DateOfBirth = Convert.ToDateTime(dtStudentRecords.Rows[i][4]);
+                                        string sDate = Convert.ToString(dtStudentRecords.Rows[i][4]);
+                                        DateTime dDate;
+                                        string newDateFormat = String.Empty;
+                                        if (DateTime.TryParseExact(sDate, "dd/MM/yyyy", null, DateTimeStyles.None, out dDate))
+                                        {
+                                            newDateFormat = string.Format("{0:MM/dd/yyyy}", dDate);
+                                        }
+                                        entity.DateOfBirth = Convert.ToDateTime(newDateFormat);
+                                    }
+                                    catch
+                                    {
+                                    }
+
+                                    string strCategory = Convert.ToString(dtStudentRecords.Rows[i][5]);
+                                    strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 21 && x.Name == strCategory).AsNoTracking().FirstOrDefault();
+                                    try
+                                    {
+                                        if (strGenderid != null) entity.CategoryId = (int)strGenderid.Id;
+                                    }
+                                    catch
+                                    {
+                                    }
+
+                                    entity.Email = Convert.ToString(dtStudentRecords.Rows[i][6]);
+                                    entity.Mobile = Convert.ToString(dtStudentRecords.Rows[i][7]);
+
+                                    string strIdentificationtype = Convert.ToString(dtStudentRecords.Rows[i][8]);
+                                    strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 5 && x.Name == strIdentificationtype).AsNoTracking().FirstOrDefault();
+                                    try
+                                    {
+                                        if (strGenderid != null) entity.UniqueTypeId = (int)strGenderid.Id;
+                                    }
+                                    catch
+                                    {
+                                    }
+                                    entity.UniqueIdNumber = Convert.ToString(dtStudentRecords.Rows[i][9]);//Identification number
+                                    string strEmploymentstatus = Convert.ToString(dtStudentRecords.Rows[i][10]);//Employment status
+                                    strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 22 && x.Name == strEmploymentstatus).AsNoTracking().FirstOrDefault();
+                                    try
+                                    {
+                                        if (strGenderid != null) entity.EmploymentStatusId = (int)strGenderid.Id;
+                                    }
+                                    catch
+                                    {
+                                    }
+
+                                    //Communication Master
+                                    userCommunication.Address1 = Convert.ToString(dtStudentRecords.Rows[i][11]);//address
+                                    string strState = Convert.ToString(dtStudentRecords.Rows[i][12]);//State
+                                    string strDistrict = Convert.ToString(dtStudentRecords.Rows[i][13]);//District
+                                    string strTaluka = Convert.ToString(dtStudentRecords.Rows[i][14]);//Taluka
+                                    var districtMasterid = _districtMaster.All.Where(x => x.StateId == 2 && x.Name == strDistrict).FirstOrDefault();
+                                    try
+                                    {
+                                        userCommunication.StateId = 2;
+                                        if (districtMasterid != null)
+                                        {
+                                            userCommunication.DistrictId = (int)districtMasterid.Id;
+                                        }
+                                        else
+                                        {
+                                            isRecordExist = false;
+                                        }
+                                    }
+                                    catch
+                                    {
+                                        isRecordExist = false;
+                                    }
+                                    var talukasid = _talukas.All.Where(x => x.DistrictId == userCommunication.DistrictId && x.Name == strTaluka).AsNoTracking().FirstOrDefault();
+                                    try
+                                    {
+                                        if (talukasid != null) userCommunication.TalukaId = (int)talukasid.Id;
+                                    }
+                                    catch
+                                    {
+                                    }
+                                    var cityid = _villageMaster.All.Where(x => x.TalukaId == userCommunication.TalukaId && x.Name == Convert.ToString(dtStudentRecords.Rows[i][15])).AsNoTracking().FirstOrDefault();
+                                    try
+                                    {
+                                        if (cityid != null) userCommunication.CityId = (int)cityid.Id;
+                                    }
+                                    catch
+                                    {
+                                    }
+                                    //userCommunication.City = Convert.ToString(dtStudentRecords.Rows[i][15]);//City
+                                    userCommunication.Pincode = Convert.ToInt32(dtStudentRecords.Rows[i][16]);//Pincode
+                                    //Education Level
+                                    string strlevelname = Convert.ToString(dtStudentRecords.Rows[i][17]);//EducationLevel
+                                    strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 2 && x.Name == strlevelname).FirstOrDefault();
+                                    try
+                                    {
+                                        if (strGenderid != null) userEducationMaster.EducationLevelId = (int)strGenderid.Id;
+                                    }
+                                    catch
+                                    {
+                                    }
+
+
+
+                                    //Insert Bulk
+
+                                    var appUserExist = await _domain.CheckEmailMobileDublicate("Mobile", "", entity.Mobile, entity.Email, entity.ApplicationUserId);
+                                    if (appUserExist != null)
+                                    {
+                                        isRecordExist = true;
+                                    }
+                                    if (entity.UniqueIdNumber != null && entity.UniqueIdNumber != "")
+                                    {
+                                        var appUserUniqueExist = await _domain.CheckEmailMobileDublicate("UniqueIdNumber", entity.UniqueIdNumber, "", "", entity.ApplicationUserId);
+                                        if (appUserUniqueExist != null)
+                                        {
+                                            isRecordExist = true;
+                                        }
+                                    }
+
+                                    if (isRecordExist == false)
+                                    {
+                                        //ASPNETUser
+                                        
+                                        var user1 = new ApplicationUser
+                                        {
+                                            UserName = string.IsNullOrWhiteSpace(entity.Email) ? entity.Mobile : entity.Email,
+                                            Email = entity.Email,
+                                            PhoneNumber = entity.Mobile,
+                                            IsEnabled = true,
+                                            EmailConfirmed = true,
+                                            Otp = ran.Next(1000, 9999).ToString(),
+                                            RegTypeId = (RegType)entity.RegType,
+                                            IsProfileComplete = true,
+                                            IsStepComplete = false
+                                        };
+                                        userCommunication.UserMasterId = user1.Id;
+                                        userEducationMaster.UserMasterId = user1.Id;
+                                        entity.ApplicationUserId = user1.Id;
+
+                                        user1.IsProfileComplete = true;
+                                        user1.IsStepComplete = false;
+                                        var result = await _userManager.CreateAsync(user1, user1.Otp);                                        
+                                        if (entity.RegType == 1)
+                                        {
+                                            await _userManager.AddToRoleAsync(user1, "user");
+                                        }
+                                        //OTP Reg
+                                        entity.CreatedBy = loginuser.Id;
+                                        var userbyEmail = await _userManager.FindByNameAsync(entity.Email);
+                                        if (userbyEmail == null)
+                                        {
+                                            userbyEmail = await _userManager.FindByNameAsync(entity.Mobile);
+                                        }
+                                        userbyEmail.EmployerStatus = (int)EmployerStatus.Pending;
+                                        var newHashedPassword = _userManager.PasswordHasher.HashPassword(userbyEmail, entity.Password);
+                                        userbyEmail.PasswordHash = newHashedPassword;
+                                        userbyEmail.IsProfileComplete = true;
+                                        userbyEmail.IsStepComplete = false;
+                                        if (Convert.ToString(userbyEmail.Email) == "")
+                                        {
+                                            userbyEmail.Email = entity.Email;
+                                        }
+                                        if (Convert.ToString(userbyEmail.PhoneNumber) == "")
+                                        {
+                                            userbyEmail.PhoneNumber = entity.Mobile;
+                                        }
+                                        await _userManager.UpdateAsync(userbyEmail);
+                                        if (string.IsNullOrEmpty(entity.RegNo))
+                                        {
+                                            if (userbyEmail.RegTypeId == RegType.Job_Seeker)
+                                            {
+                                                entity.RegNo = "JSQ" + Convert.ToString(RandomNumber.RandomNumberfun(111111111, 999999999));
+                                            }                                           
+                                        }
+                                        //Communication------
+                                        
+                                        _userCommunication.Insert(userCommunication);
+                                        //level------                                        
+                                        _userEducationMaster.Insert(userEducationMaster);
+                                        await this.Domain.AddAsync(entity);
+                                        output++;
+                                        try {
+                                            //Education Detail
+                                            try
+                                            {
+                                                UserEducationDetail userEducationDetail = new UserEducationDetail();
+                                                userEducationDetail.UserEducationMasterId = userEducationMaster.UserMasterId;
+                                                string strlevelname182 = Convert.ToString(dtStudentRecords.Rows[i][18]);//Education degree
+                                                if (!string.IsNullOrWhiteSpace(strlevelname182))
+                                                {
+                                                    var strEducationid2 = _educationMasters.All.Where(x => x.Name == strlevelname182).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid2 != null) userEducationDetail.EducationMasterId = (int)strEducationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    string strlevelname192 = Convert.ToString(dtStudentRecords.Rows[i][19]);//Education specialisation
+                                                    var strspecializationid2 = _specialization.All.Where(x => x.Name == strlevelname192).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid2 != null) userEducationDetail.SpecializationMasterId = (int)strspecializationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail.BoardUniversity = Convert.ToString(dtStudentRecords.Rows[i][20]);//Board / university
+                                                    userEducationDetail.EntryYear = Convert.ToString(dtStudentRecords.Rows[i][21]);//Entry Year
+                                                    userEducationDetail.PassingYear = Convert.ToString(dtStudentRecords.Rows[i][22]);//Passing Year
+                                                    string strGrade2 = Convert.ToString(dtStudentRecords.Rows[i][23]);//Grade / Percentage / Percentile
+                                                    strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 4 && x.Name == strGrade2).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strGenderid != null) userEducationDetail.GradeMasterId = (int)strGenderid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail.PercentageValue = Convert.ToString(dtStudentRecords.Rows[i][24]);//Grade / Percentage / Percentile Value
+                                                    _userEducationDetail.Insert(userEducationDetail);
+                                                }
+                                            }
+                                            catch { }
+                                            try
+                                            {
+                                                UserEducationDetail userEducationDetail2 = new UserEducationDetail();
+                                                userEducationDetail2.UserEducationMasterId = userEducationMaster.UserMasterId;
+                                                string strlevelname18 = Convert.ToString(dtStudentRecords.Rows[i][25]);//Education degree
+                                                if (!string.IsNullOrWhiteSpace(strlevelname18))
+                                                {
+                                                    var strEducationid = _educationMasters.All.Where(x => x.Name == strlevelname18).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid != null) userEducationDetail2.EducationMasterId = (int)strEducationid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    string strlevelname19 = Convert.ToString(dtStudentRecords.Rows[i][26]);//Education specialisation
+                                                    var strspecializationid = _specialization.All.Where(x => x.Name == strlevelname19).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid != null) userEducationDetail2.SpecializationMasterId = (int)strspecializationid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail2.BoardUniversity = Convert.ToString(dtStudentRecords.Rows[i][27]);//Board / university
+                                                    userEducationDetail2.EntryYear = Convert.ToString(dtStudentRecords.Rows[i][28]);//Entry Year
+                                                    userEducationDetail2.PassingYear = Convert.ToString(dtStudentRecords.Rows[i][29]);//Passing Year
+                                                    string strGrade = Convert.ToString(dtStudentRecords.Rows[i][30]);//Grade / Percentage / Percentile
+                                                    strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 4 && x.Name == strGrade).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strGenderid != null) userEducationDetail2.GradeMasterId = (int)strGenderid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail2.PercentageValue = Convert.ToString(dtStudentRecords.Rows[i][31]);//Grade / Percentage / Percentile Value
+                                                    _userEducationDetail.Insert(userEducationDetail2);
+                                                }
+                                            }
+                                            catch { }
+
+                                            Int32 inti = 32;
+                                            try
+                                            {
+                                                UserEducationDetail userEducationDetail2 = new UserEducationDetail();
+                                                userEducationDetail2.UserEducationMasterId = userEducationMaster.UserMasterId;
+                                                string strlevelname18 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education degree
+                                                inti++;
+                                                if (!string.IsNullOrWhiteSpace(strlevelname18))
+                                                {
+                                                    var strEducationid = _educationMasters.All.Where(x => x.Name == strlevelname18).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid != null) userEducationDetail2.EducationMasterId = (int)strEducationid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    string strlevelname19 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education specialisation
+                                                    inti++;
+                                                    var strspecializationid = _specialization.All.Where(x => x.Name == strlevelname19).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid != null) userEducationDetail2.SpecializationMasterId = (int)strspecializationid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail2.BoardUniversity = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Board / university
+                                                    inti++;
+                                                    userEducationDetail2.EntryYear = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Entry Year
+                                                    inti++;
+                                                    userEducationDetail2.PassingYear = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Passing Year
+                                                    inti++;
+                                                    string strGrade = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Grade / Percentage / Percentile
+                                                    inti++;
+                                                    strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 4 && x.Name == strGrade).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strGenderid != null) userEducationDetail2.GradeMasterId = (int)strGenderid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail2.PercentageValue = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Grade / Percentage / Percentile Value
+                                                    inti++;
+                                                    _userEducationDetail.Insert(userEducationDetail2);
+                                                }
+                                            }
+                                            catch { }
+                                            try
+                                            {
+                                                UserEducationDetail userEducationDetail2 = new UserEducationDetail();
+                                                userEducationDetail2.UserEducationMasterId = userEducationMaster.UserMasterId;
+                                                string strlevelname18 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education degree
+                                                inti++;
+                                                if (!string.IsNullOrWhiteSpace(strlevelname18))
+                                                {
+                                                    var strEducationid = _educationMasters.All.Where(x => x.Name == strlevelname18).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid != null) userEducationDetail2.EducationMasterId = (int)strEducationid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    string strlevelname19 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education specialisation
+                                                    inti++;
+                                                    var strspecializationid = _specialization.All.Where(x => x.Name == strlevelname19).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid != null) userEducationDetail2.SpecializationMasterId = (int)strspecializationid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail2.BoardUniversity = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Board / university
+                                                    inti++;
+                                                    userEducationDetail2.EntryYear = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Entry Year
+                                                    inti++;
+                                                    userEducationDetail2.PassingYear = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Passing Year
+                                                    inti++;
+                                                    string strGrade = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Grade / Percentage / Percentile
+                                                    inti++;
+                                                    strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 4 && x.Name == strGrade).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strGenderid != null) userEducationDetail2.GradeMasterId = (int)strGenderid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail2.PercentageValue = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Grade / Percentage / Percentile Value
+                                                    inti++;
+                                                    _userEducationDetail.Insert(userEducationDetail2);
+                                                }
+                                            }
+                                            catch { }
+                                            try
+                                            {
+                                                UserEducationDetail userEducationDetail2 = new UserEducationDetail();
+                                                userEducationDetail2.UserEducationMasterId = userEducationMaster.UserMasterId;
+                                                string strlevelname18 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education degree
+                                                inti++;
+                                                if (!string.IsNullOrWhiteSpace(strlevelname18))
+                                                {
+                                                    var strEducationid = _educationMasters.All.Where(x => x.Name == strlevelname18).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid != null) userEducationDetail2.EducationMasterId = (int)strEducationid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    string strlevelname19 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education specialisation
+                                                    inti++;
+                                                    var strspecializationid = _specialization.All.Where(x => x.Name == strlevelname19).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid != null) userEducationDetail2.SpecializationMasterId = (int)strspecializationid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail2.BoardUniversity = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Board / university
+                                                    inti++;
+                                                    userEducationDetail2.EntryYear = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Entry Year
+                                                    inti++;
+                                                    userEducationDetail2.PassingYear = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Passing Year
+                                                    inti++;
+                                                    string strGrade = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Grade / Percentage / Percentile
+                                                    inti++;
+                                                    strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 4 && x.Name == strGrade).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strGenderid != null) userEducationDetail2.GradeMasterId = (int)strGenderid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail2.PercentageValue = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Grade / Percentage / Percentile Value
+                                                    inti++;
+                                                    _userEducationDetail.Insert(userEducationDetail2);
+                                                }
+                                            }
+                                            catch { }
+                                            try
+                                            {
+                                                UserEducationDetail userEducationDetail2 = new UserEducationDetail();
+                                                userEducationDetail2.UserEducationMasterId = userEducationMaster.UserMasterId;
+                                                string strlevelname18 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education degree
+                                                inti++;
+                                                if (!string.IsNullOrWhiteSpace(strlevelname18))
+                                                {
+                                                    var strEducationid = _educationMasters.All.Where(x => x.Name == strlevelname18).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid != null) userEducationDetail2.EducationMasterId = (int)strEducationid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    string strlevelname19 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education specialisation
+                                                    inti++;
+                                                    var strspecializationid = _specialization.All.Where(x => x.Name == strlevelname19).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid != null) userEducationDetail2.SpecializationMasterId = (int)strspecializationid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail2.BoardUniversity = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Board / university
+                                                    inti++;
+                                                    userEducationDetail2.EntryYear = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Entry Year
+                                                    inti++;
+                                                    userEducationDetail2.PassingYear = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Passing Year
+                                                    inti++;
+                                                    string strGrade = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Grade / Percentage / Percentile
+                                                    inti++;
+                                                    strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 4 && x.Name == strGrade).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strGenderid != null) userEducationDetail2.GradeMasterId = (int)strGenderid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail2.PercentageValue = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Grade / Percentage / Percentile Value
+                                                    inti++;
+                                                    _userEducationDetail.Insert(userEducationDetail2);
+                                                }
+                                            }
+                                            catch { }
+                                            try
+                                            {
+                                                UserEducationDetail userEducationDetail2 = new UserEducationDetail();
+                                                userEducationDetail2.UserEducationMasterId = userEducationMaster.UserMasterId;
+                                                string strlevelname18 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education degree
+                                                inti++;
+                                                if (!string.IsNullOrWhiteSpace(strlevelname18))
+                                                {
+                                                    var strEducationid = _educationMasters.All.Where(x => x.Name == strlevelname18).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid != null) userEducationDetail2.EducationMasterId = (int)strEducationid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    string strlevelname19 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education specialisation
+                                                    inti++;
+                                                    var strspecializationid = _specialization.All.Where(x => x.Name == strlevelname19).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid != null) userEducationDetail2.SpecializationMasterId = (int)strspecializationid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail2.BoardUniversity = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Board / university
+                                                    inti++;
+                                                    userEducationDetail2.EntryYear = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Entry Year
+                                                    inti++;
+                                                    userEducationDetail2.PassingYear = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Passing Year
+                                                    inti++;
+                                                    string strGrade = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Grade / Percentage / Percentile
+                                                    inti++;
+                                                    strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 4 && x.Name == strGrade).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strGenderid != null) userEducationDetail2.GradeMasterId = (int)strGenderid.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    userEducationDetail2.PercentageValue = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Grade / Percentage / Percentile Value
+                                                    inti++;
+                                                    _userEducationDetail.Insert(userEducationDetail2);
+                                                }
+                                            }
+                                            catch { }
+                                            //await this.Domain.AddAsync(entity);
+                                            await _unitOfWork.CompleteAsync();
+                                        }
+                                        catch { }
+                                        try
+                                        {
+                                            CommonEmailApllication emailApllication = new CommonEmailApllication();
+                                            string htmlContent = emailApllication.RegistrationCreadational(user1.UserName, entity.RegNo, entity.Password, entity.Email, entity.Mobile);
+                                            _emailSender.SendEmailAsync(user1.Email, "Registration on Gujarat Anubandh Portal", htmlContent);
+
+                                            #region SMS
+                                            CommonSMSApplication smsApllication = new CommonSMSApplication();
+                                            string text = smsApllication.RegistrationCreadational(entity.RegNo, user1.UserName, entity.Password);
+                                            _smsSender.SendSmsMGovAsync(entity.Mobile, text, smsApllication.RegistrationCreadational_TemplateId());
+                                            #endregion
+                                        }
+                                        catch
+                                        {
+
+                                        }
+                                    }
+                                    else
+                                    {
+                                        recordexput++;
+                                        //This Record with Same Email/Mobile UserName Exists
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    erroput++;
+                                }
+                            }
+                            if (output > 0 || erroput > 0 || recordexput > 0)
+                            {
+                                // await _unitOfWork.CompleteAsync();
+                                //message =temp+ "|"+"The Excel file has been successfully uploaded." + output + " Employer Added Successfully " + recordexput + " Record with Same Email/Mobile UserName Exists. " + erroput + " Record failed to upload" +"" +"";
+                                message = "The Excel file has been successfully uploaded." + output + " user Added Successfully " + recordexput + " Record with Same Email/Mobile UserName Exists. " + erroput + " Record failed to upload" + "" + "";
+                            }
+                            else
+                            {
+                                message = "Something Went Wrong!, The Excel file uploaded has fiald.";
+                            }
+                            }
+                        }
+                        else
+                            message = "Selected file is empty.";
+                    }
+                    else
+                    {
+                        message = "Invalid File.";
+                    }
+                    #endregion
+                }
+                return GenerateOk(new { message });
+            }
+            catch (Exception)
+            {
+                return BadRequest();
+            }
+
+        }
+        [HttpPost]
+        [Route("upload-employer-list-xls")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public virtual async Task<IActionResult> PostUploadEmployerXLS(IFormFile file)
+        {
+            try
+            {
+                var loginuser = await _userManager.GetUserAsync(this.User);
+                if (loginuser == null)
+                {
+                    ModelState.AddModelError("error", "");
+                    return GenerateBadRequest(ModelState);
+                }
+                #region Variable Declaration  
+                string message = "";
+                HttpResponseMessage ResponseMessage = null;
+
+                DataSet dsexcelRecords = new DataSet();
+                IExcelDataReader reader = null;
+                Stream FileStream = null;
+                #endregion
+                //var path = @"D:\1234";
+                string fileName = Path.GetFileName(file.FileName);
+
+                string filePath = "files/docs/salaryslip" + DateTime.Now.Year + "/" + DateTime.Now.Month;
+                string dirPath = Path.Combine(_hostingEnvironment.WebRootPath, filePath);
+                bool exists = System.IO.Directory.Exists(dirPath);
+
+                if (!exists)
+                    System.IO.Directory.CreateDirectory(dirPath);
+
+                string extension = System.IO.Path.GetExtension(file.FileName);
+                string uniqueFileName = Guid.NewGuid().ToString() + "_" + file.FileName;
+                var path = Path.Combine(dirPath, uniqueFileName);
+                //file.CopyTo(new FileStream(path, FileMode.Create));
+                //file.CopyToAsync(new FileStream(path, FileMode.Create));
+
+                MediaFile mediaFile = new MediaFile();
+                mediaFile.Title = file.FileName;
+                mediaFile.MediaType = file.ContentType;
+                mediaFile.MediaUrl = "wwwroot/" + filePath + "/" + uniqueFileName;
+                mediaFile.MediaUrl = filePath + "/" + uniqueFileName;
+                _mediaFileRepository.Insert(mediaFile);
+                using (FileStream Inputfile = new FileStream(path, FileMode.Create))
+                {
+                    file.CopyTo(Inputfile);
+                    #region Save Salary From Excel  
+                    //Inputfile = stream;
+                    FileStream = Inputfile;
+                    if (Inputfile != null && FileStream != null)
+                    {
+                        if (fileName.EndsWith(".xls"))
+                            reader = ExcelReaderFactory.CreateBinaryReader(FileStream);
+                        else if (fileName.EndsWith(".xlsx"))
+                            reader = ExcelReaderFactory.CreateOpenXmlReader(FileStream);
+                        else
+                            message = "The file format is not supported.";
+
+                        dsexcelRecords = reader.AsDataSet();
+                        reader.Close();
+
+                        if (dsexcelRecords != null && dsexcelRecords.Tables.Count > 0)
+                        {
+                            int output = 0;
+                            int erroput = 0;
+                            int recordexput = 0;
+
+                            DataTable dtStudentRecords = dsexcelRecords.Tables[0];
+                            if (dtStudentRecords.Rows.Count > 1005)
+                            {
+                                message = "The Excel file uploaded limit is 1000 Records per file.";
+                            }
+                            else { 
+                            for (int i = 1; i < dtStudentRecords.Rows.Count; i++)
+                            {
+                                bool isRecordExist = false;
+                                UserMaster entity = new UserMaster();
+                                UserCommunication userCommunication = new UserCommunication();
+                                UserOrganisation userOrganisation = new UserOrganisation();
+                                try
+                                {
+                                    AppObject strOrgTpeid = new AppObject();
+                                    Int32 inti = 0;
+                                    userOrganisation.OrganisationName = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                    inti++;
+                                    string OrgTpe = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                    try
+                                    {
+                                        strOrgTpeid = _appObject.All.Where(x => x.AppObjectTypeId == 8 && x.Name == OrgTpe).FirstOrDefault();
+                                        if (strOrgTpeid != null) userOrganisation.OrganisationTypeId = (int)strOrgTpeid.Id;
+                                    }
+                                    catch
+                                    {
+                                    }
+                                    inti++;
+                                    string secname = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                    try
+                                    {
+                                        strOrgTpeid = _appObject.All.Where(x => x.AppObjectTypeId == 11 && x.Name == secname).FirstOrDefault();
+                                        if (strOrgTpeid != null) userOrganisation.SectorMasterId = (int)strOrgTpeid.Id;
+                                    }
+                                    catch
+                                    {
+                                    }
+                                    //
+                                    inti++;
+                                    userOrganisation.Description = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                    inti++;
+                                    userOrganisation.YearofIncorporation = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+
+                                    //
+                                    inti++;
+                                    string strUniqueTypeId = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                    strOrgTpeid = _appObject.All.Where(x => x.AppObjectTypeId == 1032 && x.Name == strUniqueTypeId).FirstOrDefault();
+                                    try
+                                    {
+                                        if (strOrgTpeid != null) entity.UniqueTypeId = (int)strOrgTpeid.Id;
+                                    }
+                                    catch
+                                    {
+                                    }
+                                    //entity.UniqueTypeId
+                                    inti++;
+                                    entity.UniqueIdNumber = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                    inti++;
+
+                                    //Communication Master
+                                    userCommunication.Address1 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//address
+                                    inti++;
+                                    string strState = Convert.ToString(dtStudentRecords.Rows[i][inti]);//State
+                                    inti++;
+                                    string strDistrict = Convert.ToString(dtStudentRecords.Rows[i][inti]);//District
+                                    inti++;
+                                    string strTaluka = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Taluka
+                                    inti++;
+                                    var districtMasterid = _districtMaster.All.Where(x => x.StateId == 2 && x.Name == strDistrict).FirstOrDefault();
+                                    try
+                                    {
+                                        userCommunication.StateId = 2;
+                                        if (districtMasterid != null)
+                                        {
+                                            userCommunication.DistrictId = (int)districtMasterid.Id;
+                                        }
+                                        else
+                                        {
+                                            isRecordExist = false;
+                                        }
+                                    }
+                                    catch
+                                    {
+                                        isRecordExist = false;
+                                    }
+                                    var talukasid = _talukas.All.Where(x => x.DistrictId == userCommunication.DistrictId && x.Name == strTaluka).FirstOrDefault();
+                                    try
+                                    {
+                                        if (talukasid != null) userCommunication.TalukaId = (int)talukasid.Id;
+                                    }
+                                    catch
+                                    {
+                                    }
+                                    var cityid = _villageMaster.All.Where(x => x.TalukaId == userCommunication.TalukaId && x.Name == Convert.ToString(dtStudentRecords.Rows[i][inti])).FirstOrDefault();
+                                    try
+                                    {
+                                        if (cityid != null) userCommunication.CityId = (int)cityid.Id;
+                                    }
+                                    catch
+                                    {
+                                    }
+                                    //userCommunication.City = Convert.ToString(dtStudentRecords.Rows[i][inti]);//City
+                                    inti++;
+                                    userCommunication.Pincode = Convert.ToInt32(dtStudentRecords.Rows[i][inti]);//Pincode
+                                    inti++;
+                                    userCommunication.OfficeNumber = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Office Number
+                                    inti++;
+                                    userCommunication.OfficeEmail = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Office Email
+                                    inti++;
+                                    userCommunication.Website = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Website
+                                    inti++;
+                                    //UserMaster
+                                    entity.RegType = 2;//Temp
+                                    entity.IsProfileCompleted = false;
+                                    entity.Password = RandomString(10); 
+                                    entity.FirstName = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                    inti++;
+                                    entity.MiddleName = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                    inti++;
+                                    entity.LastName = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                    inti++;
+                                    entity.ContactPersonDesignation = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                    inti++;
+                                    entity.Email = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                    inti++;
+                                    entity.Mobile = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+
+
+                                    //Insert Bulk
+
+                                    var appUserExist = await _domain.CheckEmailMobileDublicate("Mobile", "", entity.Mobile, entity.Email, entity.ApplicationUserId);
+                                    if (appUserExist != null)
+                                    {
+                                        isRecordExist = true;
+                                    }
+                                    if (entity.UniqueIdNumber != null && entity.UniqueIdNumber != "")
+                                    {
+                                        var appUserUniqueExist = await _domain.CheckEmailMobileDublicate("UniqueIdNumber", entity.UniqueIdNumber, "", "", entity.ApplicationUserId);
+                                        if (appUserUniqueExist != null)
+                                        {
+                                            isRecordExist = true;
+                                        }
+                                    }
+
+                                    if (isRecordExist == false)
+                                    {
+                                        //ASPNETUser
+                                        Random ran = new Random();
+                                        var user1 = new ApplicationUser
+                                        {
+                                            UserName = string.IsNullOrWhiteSpace(entity.Email) ? entity.Mobile : entity.Email,
+                                            Email = entity.Email,
+                                            PhoneNumber = entity.Mobile,
+                                            IsEnabled = true,
+                                            EmailConfirmed = true,
+                                            Otp = ran.Next(1000, 9999).ToString(),
+                                            RegTypeId = (RegType)entity.RegType,
+                                            IsProfileComplete = true,
+                                            IsStepComplete = true
+                                        };
+                                        user1.IsProfileComplete = true;
+                                        user1.IsStepComplete = false;
+                                        var result = await _userManager.CreateAsync(user1, user1.Otp);
+
+                                        if (entity.RegType == 2)
+                                            await _userManager.AddToRoleAsync(user1, "employer");
+
+                                        //OTP Reg
+                                        entity.ApplicationUserId = user1.Id;
+                                        entity.CreatedBy = loginuser.Id;
+                                        var userbyEmail = await _userManager.FindByNameAsync(entity.Email);
+                                        if (userbyEmail == null)
+                                        {
+                                            userbyEmail = await _userManager.FindByNameAsync(entity.Mobile);
+                                        }
+                                        userbyEmail.EmployerStatus = (int)EmployerStatus.Pending;
+                                        var newHashedPassword = _userManager.PasswordHasher.HashPassword(userbyEmail, entity.Password);
+                                        userbyEmail.PasswordHash = newHashedPassword;
+                                        userbyEmail.IsProfileComplete = true;
+                                        userbyEmail.IsStepComplete = false;
+                                        if (Convert.ToString(userbyEmail.Email) == "")
+                                        {
+                                            userbyEmail.Email = entity.Email;
+                                        }
+                                        if (Convert.ToString(userbyEmail.PhoneNumber) == "")
+                                        {
+                                            userbyEmail.PhoneNumber = entity.Mobile;
+                                        }
+                                        await _userManager.UpdateAsync(userbyEmail);
+                                        if (string.IsNullOrEmpty(entity.RegNo))
+                                        {
+                                            entity.RegNo = "EMQ" + Convert.ToString(RandomNumber.RandomNumberfun(111111111, 999999999));
+                                        }
+                                        //Communication------
+                                        userCommunication.UserMasterId = user1.Id;
+                                        userOrganisation.UserMasterId = user1.Id;
+                                        _userCommunication.Insert(userCommunication);
+                                        _userOrganisation.Insert(userOrganisation);
+                                        await this.Domain.AddAsync(entity);
+                                        try
+                                        {
+                                            CommonEmailApllication emailApllication = new CommonEmailApllication();
+                                            string htmlContent = emailApllication.RegistrationCreadational(user1.UserName, entity.RegNo, entity.Password, entity.Email, entity.Mobile);
+                                             _emailSender.SendEmailAsync(user1.Email, "Registration on Gujarat Anubandh Portal", htmlContent);
+
+                                            #region SMS
+                                            CommonSMSApplication smsApllication = new CommonSMSApplication();
+                                            string text = smsApllication.RegistrationCreadational(entity.RegNo, user1.UserName, entity.Password);
+                                             _smsSender.SendSmsMGovAsync(entity.Mobile, text, smsApllication.RegistrationCreadational_TemplateId());
+                                            #endregion
+                                        }
+                                        catch
+                                        {
+
+                                        }
+                                        output++;
+                                    }
+                                    else
+                                    {
+                                        recordexput++;
+                                        //This Record with Same Email/Mobile UserName Exists
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    erroput++;
+                                }
+
+                            }
+                            }
+                            if (output > 0 || erroput > 0 || recordexput > 0)
+                            {
+                                // await _unitOfWork.CompleteAsync();
+                                message = "The Excel file has been successfully uploaded." + output + " user Added Successfully " + recordexput + " Record with Same Email/Mobile UserName Exists. " + erroput + " Record failed to upload";
+                            }
+                            else
+                            {
+                                message = "Something Went Wrong!, The Excel file uploaded has fiald.";
+                            }
+                        }
+                        else
+                        {
+                            message = "Selected file is empty.";
+                        }
+                    }
+                    else
+                    {
+                        message = "Invalid File.";
+                    }
+                    #endregion
+                }
+                //Code
+                return GenerateOk(new { message });
+            }
+            catch (Exception)
+            {
+                return BadRequest();
+            }
+        }
+
+        [HttpPost]
+        [Route("upload-jobpost-xls")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
+        public virtual async Task<IActionResult> PostUploadJobPostXLS(IFormFile file)
+        {
+            try
+            {
+                var loginuser = await _userManager.GetUserAsync(this.User);
+                if (loginuser == null)
+                {
+                    ModelState.AddModelError("error", "");
+                    return GenerateBadRequest(ModelState);
+                }
+                #region Variable Declaration  
+                string message = "";
+                HttpResponseMessage ResponseMessage = null;
+
+                DataSet dsexcelRecords = new DataSet();
+                IExcelDataReader reader = null;
+                Stream FileStream = null;
+                #endregion
+                //var path = @"D:\1234";
+                string fileName = Path.GetFileName(file.FileName);
+
+                string filePath = "files/docs/salaryslip" + DateTime.Now.Year + "/" + DateTime.Now.Month;
+                string dirPath = Path.Combine(_hostingEnvironment.WebRootPath, filePath);
+                bool exists = System.IO.Directory.Exists(dirPath);
+
+                if (!exists)
+                    System.IO.Directory.CreateDirectory(dirPath);
+
+                string extension = System.IO.Path.GetExtension(file.FileName);
+                string uniqueFileName = Guid.NewGuid().ToString() + "_" + file.FileName;
+                var path = Path.Combine(dirPath, uniqueFileName);
+                //file.CopyTo(new FileStream(path, FileMode.Create));
+                //file.CopyToAsync(new FileStream(path, FileMode.Create));
+
+                MediaFile mediaFile = new MediaFile();
+                mediaFile.Title = file.FileName;
+                mediaFile.MediaType = file.ContentType;
+                mediaFile.MediaUrl = "wwwroot/" + filePath + "/" + uniqueFileName;
+                mediaFile.MediaUrl = filePath + "/" + uniqueFileName;
+                _mediaFileRepository.Insert(mediaFile);
+                using (FileStream Inputfile = new FileStream(path, FileMode.Create))
+                {
+                    file.CopyTo(Inputfile);
+                    #region Save Salary From Excel  
+                    //Inputfile = stream;
+                    FileStream = Inputfile;
+                    if (Inputfile != null && FileStream != null)
+                    {
+                        if (fileName.EndsWith(".xls"))
+                            reader = ExcelReaderFactory.CreateBinaryReader(FileStream);
+                        else if (fileName.EndsWith(".xlsx"))
+                            reader = ExcelReaderFactory.CreateOpenXmlReader(FileStream);
+                        else
+                            message = "The file format is not supported.";
+
+                        dsexcelRecords = reader.AsDataSet();
+                        reader.Close();
+
+                        if (dsexcelRecords != null && dsexcelRecords.Tables.Count > 0)
+                        {
+                            int output = 0;
+                            int errrput = 0;
+                            DataTable dtStudentRecords = dsexcelRecords.Tables[0];
+                            if (dtStudentRecords.Rows.Count > 1005)
+                            {
+                                message = "The Excel file uploaded limit is 1000 Records per file.";
+                            }
+                            else
+                            {
+                                for (int i = 1; i < dtStudentRecords.Rows.Count; i++)
+                                {
+
+                                    bool isRecordExist = false;
+                                    JobPost entityRes = new JobPost();
+                                    //JobPostEducation jobPostEducations = new JobPostEducation();
+                                    //Employer-Reference Number	
+                                    try
+                                    {
+                                        AppObject strOrgTpeid = new AppObject();
+                                        Int32 inti = 0;
+                                        string regno = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                        var EmployerIdobj = _userMasterRepository.All.Where(x => x.RegNo == regno).FirstOrDefault();
+                                        if (EmployerIdobj != null)
+                                        {
+                                            entityRes.EmployerId = EmployerIdobj.ApplicationUserId;
+                                            inti++;
+                                            entityRes.JobPostTitle = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                            inti++;
+                                            string secname = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                            try
+                                            {
+                                                strOrgTpeid = _appObject.All.Where(x => x.AppObjectTypeId == 11 && x.Name == secname).FirstOrDefault();
+                                                if (strOrgTpeid != null) entityRes.SectorId = (int)strOrgTpeid.Id;
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            string joblvlname = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                            try
+                                            {
+                                                strOrgTpeid = _appObject.All.Where(x => x.AppObjectTypeId == 1036 && x.Name == joblvlname).FirstOrDefault();
+                                                if (strOrgTpeid != null) entityRes.LevelofJob = (int)strOrgTpeid.Id;
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            string jobntrname = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                            try
+                                            {
+                                                strOrgTpeid = _appObject.All.Where(x => x.AppObjectTypeId == 1007 && x.Name == jobntrname).FirstOrDefault();
+                                                if (strOrgTpeid != null) entityRes.JobNatureId = (int)strOrgTpeid.Id;
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                entityRes.SCVacancy = Convert.ToInt32(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+                                                entityRes.SCVacancy = 0;
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                entityRes.STVacancy = Convert.ToInt32(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+                                                entityRes.STVacancy = 0;
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                entityRes.SEBCVacancy = Convert.ToInt32(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+                                                entityRes.SEBCVacancy = 0;
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                entityRes.GeneralVacancy = Convert.ToInt32(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+                                                entityRes.GeneralVacancy = 0;
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                entityRes.PHVacancy = Convert.ToInt32(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+                                                entityRes.PHVacancy = 0;
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                entityRes.EWSVacancy = Convert.ToInt32(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+                                                entityRes.EWSVacancy = 0;
+                                            }
+                                            inti++;
+                                            entityRes.TotalVacancy = entityRes.SCVacancy + entityRes.STVacancy + entityRes.SEBCVacancy +
+                                            entityRes.GeneralVacancy + entityRes.PHVacancy + entityRes.EWSVacancy;
+
+                                            string strGender = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                            AppObject strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 1006 && x.Name == strGender).FirstOrDefault();
+                                            try
+                                            {
+                                                if (strGenderid != null) entityRes.GenderId = (int)strGenderid.Id;
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            entityRes.JobDescription = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                            inti++;
+                                            try
+                                            {
+                                                string exserstr = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                                if (exserstr == "Yes")
+                                                {
+                                                    entityRes.IsExServiceman = true;
+                                                }
+                                                else
+                                                {
+                                                    entityRes.IsExServiceman = false;
+                                                }
+                                                //entityRes.IsExServiceman = Convert.ToBoolean(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                string exserstr = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                                if (exserstr == "Yes")
+                                                {
+                                                    entityRes.IsPwd = true;
+                                                }
+                                                else
+                                                {
+                                                    entityRes.IsPwd = false;
+                                                }
+                                                //entityRes.IsPwd = Convert.ToBoolean(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            List<JobPostLocation> jobPostLocationList = new List<JobPostLocation>();
+                                            string exserstr1 = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                            if (!string.IsNullOrWhiteSpace(exserstr1))
+                                            {
+                                                List<string> locationlist = exserstr1.Split(',').Select(x => x).ToList();
+                                                foreach (string value in locationlist)
+                                                {
+                                                    var districtMasterid1 = _districtMaster.All.Where(x => x.StateId == 2 && x.Name == value).FirstOrDefault();
+                                                    if (districtMasterid1 != null)
+                                                    {
+                                                        JobPostLocation jobPostLocation = new JobPostLocation();
+                                                        jobPostLocation.DistrictId = districtMasterid1.Id;
+                                                        jobPostLocation.Checked = true;
+                                                        jobPostLocationList.Add(jobPostLocation);
+                                                    }
+                                                }
+                                                if (exserstr1 == "Outside Gujarat")
+                                                {
+                                                    entityRes.IsOutofGujarat = true;
+                                                }
+                                                if (exserstr1 == "All Gujarat")
+                                                {
+                                                    entityRes.IsAllLocation = true;
+                                                }
+                                                //var districtMasterid1 = _districtMaster.All.Where(x => x.StateId == 2 && x.Name == strDistrict).FirstOrDefault();
+                                                //entities = entities.Where(x => x.OrganisationTypeId.HasValue && organaizatonList.Contains(x.OrganisationTypeId.Value));
+                                            }
+
+                                            //Job location	
+                                            inti++;
+
+                                            try
+                                            {
+                                                entityRes.ProposedSalary = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                // entityRes.ApproxJoiningOn = Convert.ToDateTime(dtStudentRecords.Rows[i][inti]);
+                                                string sDate = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                                DateTime dDate;
+                                                string newDateFormat = String.Empty;
+                                                if (DateTime.TryParseExact(sDate, "dd/MM/yyyy", null, DateTimeStyles.None, out dDate))
+                                                {
+                                                    newDateFormat = string.Format("{0:MM/dd/yyyy}", dDate);
+                                                }
+                                                entityRes.ApproxJoiningOn = Convert.ToDateTime(newDateFormat);
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                string sDate = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                                DateTime dDate;
+                                                string newDateFormat = String.Empty;
+                                                if (DateTime.TryParseExact(sDate, "dd/MM/yyyy", null, DateTimeStyles.None, out dDate))
+                                                {
+                                                    newDateFormat = string.Format("{0:MM/dd/yyyy}", dDate);
+                                                }
+                                                entityRes.ExpiringOn = Convert.ToDateTime(newDateFormat);
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                entityRes.MinAge = Convert.ToInt32(dtStudentRecords.Rows[i][inti]);
+                                                if (entityRes.MinAge > 0)
+                                                {
+                                                    entityRes.IsAgePreference = true;
+                                                }
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                entityRes.MaxAge = Convert.ToInt32(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                string sDate = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                                DateTime dDate;
+                                                string newDateFormat = String.Empty;
+                                                if (DateTime.TryParseExact(sDate, "dd/MM/yyyy", null, DateTimeStyles.None, out dDate))
+                                                {
+                                                    newDateFormat = string.Format("{0:MM/dd/yyyy}", dDate);
+                                                }
+                                                entityRes.MinDOB = Convert.ToDateTime(newDateFormat);
+                                            }
+                                            catch
+                                            {
+
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                string sDate = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                                DateTime dDate;
+                                                string newDateFormat = String.Empty;
+                                                if (DateTime.TryParseExact(sDate, "dd/MM/yyyy", null, DateTimeStyles.None, out dDate))
+                                                {
+                                                    newDateFormat = string.Format("{0:MM/dd/yyyy}", dDate);
+                                                }
+                                                entityRes.MaxDOB = Convert.ToDateTime(newDateFormat);
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                entityRes.MinExperience = Convert.ToInt32(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                string exserstr = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                                if (exserstr == "Yes")
+                                                {
+                                                    entityRes.IsFieldJob = true;
+                                                }
+                                                else
+                                                {
+                                                    entityRes.IsFieldJob = false;
+                                                }
+                                                //entityRes.IsFieldJob = Convert.ToBoolean(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                string exserstr = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                                if (exserstr == "Yes")
+                                                {
+                                                    entityRes.IsDeskJob = true;
+                                                }
+                                                else
+                                                {
+                                                    entityRes.IsDeskJob = false;
+                                                }
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            inti++;
+                                            try
+                                            {
+                                                string exserstr = Convert.ToString(dtStudentRecords.Rows[i][inti]);
+                                                if (exserstr == "Yes")
+                                                {
+                                                    entityRes.IsTravellingJob = true;
+                                                }
+                                                else
+                                                {
+                                                    entityRes.IsTravellingJob = false;
+                                                }
+                                                //entityRes.IsTravellingJob = Convert.ToBoolean(dtStudentRecords.Rows[i][inti]);
+                                            }
+                                            catch
+                                            {
+                                            }
+                                            //Insert Bulk
+                                            entityRes.IsActive = false;
+                                            _jobPostRepository.Insert(entityRes);
+                                            await _unitOfWork.CompleteAsync();
+                                            output++;
+                                            //Education level	Education degree	Education specialisation
+                                            try
+                                            {
+                                                JobPostEducation jobPostEducations1 = new JobPostEducation();
+                                                inti++;
+                                                jobPostEducations1.JobPostId = entityRes.Id;
+                                                //Education Level
+                                                string strlevelname = Convert.ToString(dtStudentRecords.Rows[i][inti]);//EducationLevel
+                                                strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 2 && x.Name == strlevelname).FirstOrDefault();
+                                                try
+                                                {
+                                                    if (strGenderid != null) jobPostEducations1.MinEducationLevelId = (int)strGenderid.Id;
+                                                }
+                                                catch
+                                                {
+                                                }
+
+
+                                                inti++;
+                                                if (!string.IsNullOrWhiteSpace(strlevelname))
+                                                {
+                                                    string strlevelname182 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education degree
+                                                    var strEducationid2 = _educationMasters.All.Where(x => x.Name == strlevelname182).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid2 != null) jobPostEducations1.EducationMasterId = (int)strEducationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    inti++;
+                                                    string strlevelname192 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education specialisation
+                                                    var strspecializationid2 = _specialization.All.Where(x => x.Name == strlevelname192).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid2 != null) jobPostEducations1.SpecilizatoinId = (int)strspecializationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    _jobPostEducation.Insert(jobPostEducations1);
+                                                }
+                                            }
+                                            catch { }
+                                            try
+                                            {
+                                                JobPostEducation jobPostEducations2 = new JobPostEducation();
+                                                inti++;
+                                                jobPostEducations2.JobPostId = entityRes.Id;
+                                                //Education Level
+                                                string strlevelname = Convert.ToString(dtStudentRecords.Rows[i][inti]);//EducationLevel
+                                                strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 2 && x.Name == strlevelname).FirstOrDefault();
+                                                try
+                                                {
+                                                    if (strGenderid != null) jobPostEducations2.MinEducationLevelId = (int)strGenderid.Id;
+                                                }
+                                                catch
+                                                {
+                                                }
+                                                inti++;
+                                                if (!string.IsNullOrWhiteSpace(strlevelname))
+                                                {
+                                                    string strlevelname182 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education degree
+                                                    var strEducationid2 = _educationMasters.All.Where(x => x.Name == strlevelname182).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid2 != null) jobPostEducations2.EducationMasterId = (int)strEducationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    inti++;
+                                                    string strlevelname192 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education specialisation
+                                                    var strspecializationid2 = _specialization.All.Where(x => x.Name == strlevelname192).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid2 != null) jobPostEducations2.SpecilizatoinId = (int)strspecializationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    _jobPostEducation.Insert(jobPostEducations2);
+                                                }
+                                            }
+                                            catch { }
+                                            try
+                                            {
+                                                JobPostEducation jobPostEducations3 = new JobPostEducation();
+                                                inti++;
+                                                jobPostEducations3.JobPostId = entityRes.Id;
+                                                //Education Level
+                                                string strlevelname = Convert.ToString(dtStudentRecords.Rows[i][inti]);//EducationLevel
+                                                strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 2 && x.Name == strlevelname).FirstOrDefault();
+                                                try
+                                                {
+                                                    if (strGenderid != null) jobPostEducations3.MinEducationLevelId = (int)strGenderid.Id;
+                                                }
+                                                catch
+                                                {
+                                                }
+                                                inti++;
+                                                if (!string.IsNullOrWhiteSpace(strlevelname))
+                                                {
+                                                    string strlevelname182 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education degree
+                                                    var strEducationid2 = _educationMasters.All.Where(x => x.Name == strlevelname182).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid2 != null) jobPostEducations3.EducationMasterId = (int)strEducationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    inti++;
+                                                    string strlevelname192 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education specialisation
+                                                    var strspecializationid2 = _specialization.All.Where(x => x.Name == strlevelname192).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid2 != null) jobPostEducations3.SpecilizatoinId = (int)strspecializationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    _jobPostEducation.Insert(jobPostEducations3);
+                                                }
+                                            }
+                                            catch { }
+                                            try
+                                            {
+                                                JobPostEducation jobPostEducations4 = new JobPostEducation();
+                                                inti++;
+                                                jobPostEducations4.JobPostId = entityRes.Id;
+                                                //Education Level
+                                                string strlevelname = Convert.ToString(dtStudentRecords.Rows[i][inti]);//EducationLevel
+                                                strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 2 && x.Name == strlevelname).FirstOrDefault();
+                                                try
+                                                {
+                                                    if (strGenderid != null) jobPostEducations4.MinEducationLevelId = (int)strGenderid.Id;
+                                                }
+                                                catch
+                                                {
+                                                }
+                                                inti++;
+                                                if (!string.IsNullOrWhiteSpace(strlevelname))
+                                                {
+                                                    string strlevelname182 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education degree
+                                                    var strEducationid2 = _educationMasters.All.Where(x => x.Name == strlevelname182).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid2 != null) jobPostEducations4.EducationMasterId = (int)strEducationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    inti++;
+                                                    string strlevelname192 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education specialisation
+                                                    var strspecializationid2 = _specialization.All.Where(x => x.Name == strlevelname192).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid2 != null) jobPostEducations4.SpecilizatoinId = (int)strspecializationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    _jobPostEducation.Insert(jobPostEducations4);
+                                                }
+                                            }
+                                            catch { }
+                                            try
+                                            {
+                                                JobPostEducation jobPostEducations5 = new JobPostEducation();
+                                                inti++;
+                                                jobPostEducations5.JobPostId = entityRes.Id;
+                                                //Education Level
+                                                string strlevelname = Convert.ToString(dtStudentRecords.Rows[i][inti]);//EducationLevel
+                                                strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 2 && x.Name == strlevelname).FirstOrDefault();
+                                                try
+                                                {
+                                                    if (strGenderid != null) jobPostEducations5.MinEducationLevelId = (int)strGenderid.Id;
+                                                }
+                                                catch
+                                                {
+                                                }
+                                                inti++;
+                                                if (!string.IsNullOrWhiteSpace(strlevelname))
+                                                {
+                                                    string strlevelname182 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education degree
+                                                    var strEducationid2 = _educationMasters.All.Where(x => x.Name == strlevelname182).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid2 != null) jobPostEducations5.EducationMasterId = (int)strEducationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    inti++;
+                                                    string strlevelname192 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education specialisation
+                                                    var strspecializationid2 = _specialization.All.Where(x => x.Name == strlevelname192).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid2 != null) jobPostEducations5.SpecilizatoinId = (int)strspecializationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    _jobPostEducation.Insert(jobPostEducations5);
+                                                }
+                                            }
+                                            catch { }
+                                            try
+                                            {
+                                                inti++;
+                                                JobPostEducation jobPostEducations6 = new JobPostEducation();
+                                                jobPostEducations6.JobPostId = entityRes.Id;
+                                                //Education Level
+                                                string strlevelname = Convert.ToString(dtStudentRecords.Rows[i][inti]);//EducationLevel
+                                                strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 2 && x.Name == strlevelname).FirstOrDefault();
+                                                try
+                                                {
+                                                    if (strGenderid != null) jobPostEducations6.MinEducationLevelId = (int)strGenderid.Id;
+                                                }
+                                                catch
+                                                {
+                                                }
+                                                inti++;
+                                                if (!string.IsNullOrWhiteSpace(strlevelname))
+                                                {
+                                                    string strlevelname182 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education degree
+                                                    var strEducationid2 = _educationMasters.All.Where(x => x.Name == strlevelname182).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid2 != null) jobPostEducations6.EducationMasterId = (int)strEducationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    inti++;
+                                                    string strlevelname192 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education specialisation
+                                                    var strspecializationid2 = _specialization.All.Where(x => x.Name == strlevelname192).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid2 != null) jobPostEducations6.SpecilizatoinId = (int)strspecializationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    _jobPostEducation.Insert(jobPostEducations6);
+                                                }
+                                            }
+                                            catch { }
+                                            try
+                                            {
+                                                inti++;
+                                                JobPostEducation jobPostEducations7 = new JobPostEducation();
+                                                jobPostEducations7.JobPostId = entityRes.Id;
+                                                //Education Level
+                                                string strlevelname = Convert.ToString(dtStudentRecords.Rows[i][inti]);//EducationLevel
+                                                strGenderid = _appObject.All.Where(x => x.AppObjectTypeId == 2 && x.Name == strlevelname).FirstOrDefault();
+                                                try
+                                                {
+                                                    if (strGenderid != null) jobPostEducations7.MinEducationLevelId = (int)strGenderid.Id;
+                                                }
+                                                catch
+                                                {
+                                                }
+                                                inti++;
+                                                if (!string.IsNullOrWhiteSpace(strlevelname))
+                                                {
+                                                    string strlevelname182 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education degree
+                                                    var strEducationid2 = _educationMasters.All.Where(x => x.Name == strlevelname182).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strEducationid2 != null) jobPostEducations7.EducationMasterId = (int)strEducationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    inti++;
+                                                    string strlevelname192 = Convert.ToString(dtStudentRecords.Rows[i][inti]);//Education specialisation
+                                                    var strspecializationid2 = _specialization.All.Where(x => x.Name == strlevelname192).FirstOrDefault();
+                                                    try
+                                                    {
+                                                        if (strspecializationid2 != null) jobPostEducations7.SpecilizatoinId = (int)strspecializationid2.Id;
+                                                    }
+                                                    catch
+                                                    {
+                                                    }
+                                                    _jobPostEducation.Insert(jobPostEducations7);
+
+                                                }
+                                            }
+                                            catch { }
+
+
+                                            foreach (var value in jobPostLocationList)
+                                            {
+                                                JobPostLocation jobPostLocation = new JobPostLocation();
+                                                jobPostLocation.DistrictId = value.DistrictId;
+                                                jobPostLocation.JobPostId = entityRes.Id;
+                                                jobPostLocation.Checked = true;
+                                                _jobPostLocation.Insert(jobPostLocation);
+                                            }
+                                            await _unitOfWork.CompleteAsync();
+                                        }//RefNoNotFound
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        errrput++;
+                                    }
+                                }
+                                if (output > 0)
+                                {
+                                    //await _unitOfWork.CompleteAsync();
+                                    message = "from Excel " + output + " record has been successfully uploaded and " + errrput + " record having some issue to upload.";
+                                }
+                                else
+                                {
+                                    message = "Something Went Wrong!, The Excel file uploaded has fiald.";
+                                }
+                            }
+                        }
+                        else
+                        {
+                            message = "Selected file is empty.";
+                        }
+                    }
+                    else
+                    {
+                        message = "Invalid File.";
+                    }
+                    #endregion
+                }
+                //Code
+                return GenerateOk(new { message });
+            }
+            catch (Exception)
+            {
+                return BadRequest();
+            }
+        }
+    }
+}
